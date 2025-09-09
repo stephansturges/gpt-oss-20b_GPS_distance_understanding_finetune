@@ -4,11 +4,11 @@
   "results_file": "eval_results.parquet",
   "n": 20,
   "bucket_counts": {
-    "perfect": 4,
-    "approx": 1,
-    "pretty_close": 1,
-    "wrong": 14
+    "perfect": 17,
+    "approx": 0,
+    "pretty_close": 0,
+    "wrong": 3
   },
-  "total_points": 44,
-  "points_per_sample": 2.2
+  "total_points": 170,
+  "points_per_sample": 8.5
 }

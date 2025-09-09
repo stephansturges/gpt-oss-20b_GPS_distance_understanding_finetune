@@ -3,50 +3,58 @@
 """
 run_eval_gpt_oss.py
 -------------------
-Evaluate a gpt-oss model with Transformers on a GPS distance reasoning eval set.
+Evaluate a GPT‑OSS model with Transformers on a GPS distance reasoning eval set.
 
-SCORING (explicit & logged):
-- We parse the model’s output, preferring a dedicated Harmony “final” channel if present.
-  If absent, we consider the whole text; we may also look at the “analysis” channel
-  as a fallback when final has no plausible numeric candidates.
-- We extract numeric candidates (robust to thousands separators like “26,300” or “9 330”)
-  and any nearby unit tokens. For each candidate we compute a heuristic score:
-    +5  if a normalized distance unit is present (km/mi/nmi/klick/etc.)
-    +3  if near distance keywords (“distance”, “final”, “answer”, “result”, “≈”, “~”, “about”)
-    +2  if near “final-ish” terms (“≈”, “~”, “about”, “roughly”, “final”, “answer”, “result”)
-    +2  if located toward the tail of the message (tail bias)
-    −6  if near latitude/longitude/DMS markers (°, deg, ′, ″, min, sec)
-    −6  if near Earth-radius constants (e.g., “R=6371”, “mean radius”)
-    −4  if near math-only markers (π, “rad”, “radian”)
-    −1  if the magnitude is very small (< 5), to downweight incidental intermediates
-  The per-candidate **score breakdown** is logged when --verbose is set.
-- We rank candidates by (score desc, position desc, magnitude desc) and pick the top.
-  If it lacks an explicit unit, we:
-    (a) prefer a unit hinted by the user request (e.g., “sea miles/nm/nmi”, “klicks” => km),
-        and log that decision; otherwise
-    (b) pick the interpretation among km/mi/nmi whose value is closest to a robust
-        reference magnitude formed from the top candidates.
-- We compute relative error vs ground-truth kilometers:
+SCORING (explicit & logged)
+---------------------------
+1) We parse the model output, preferring a Harmony “final” channel if present.
+   If absent, we fall back to alternatives (legacy markers or a trailing 'Final: ...').
+2) We extract numeric candidates (robust to thousands separators like “26,300”
+   or “9 330”) plus nearby units. Each candidate gets a heuristic score:
+     +5 if it has an explicit normalized unit (km/mi/nmi/klick/etc.)
+     +3 if near distance keywords (“distance”, “final”, “answer”, “result”, “≈”, “~”)
+     +2 if near “final-ish” words (“about”, “roughly”, “≈”, “result”)
+     +2 tail-bias (appears towards the end of the message)
+     −6 near latitude/longitude/DMS markers (°, deg, ′, ″, min, sec)
+     −6 near Earth-radius constants (“R=6371”, “mean radius”, “6371.0088”)
+     −4 near math-only markers (π, “rad”, “radian”)
+     −1 tiny magnitude (< 5) to downweight incidental intermediates
+   A small optional “fit bonus” uses ground-truth to gently favor candidates
+   that are near the expected distance (off by <10%: +1; <5%: +2; <1%: +3).
+3) We rank by (score desc, position desc, magnitude desc) and pick the winner.
+   If it lacks an explicit unit, we:
+     (a) prefer a unit hinted by the user request (e.g., “sea miles/nm/nmi” → nmi,
+         “klicks”/“clicks” → km), else
+     (b) choose among km/mi/nmi the interpretation closest to a robust reference
+         magnitude computed from the top few candidates.
+4) Relative error vs ground-truth kilometers:
       rel = |pred_km − expected_km| / expected_km
-  Buckets:
+   Buckets:
       < 1%       → "perfect"       (10 points)
       < 5%       → "approx"         (3 points)
       < 10%      → "pretty_close"   (1 point)
       ≥ 10%      → "wrong"          (0 points)
-- We report bucket counts, total points, and points per sample, and write the
-  per-sample details to a Parquet file. The per-sample row includes the chosen
-  candidate, normalized/assumed unit, converted km, relative error, and whether
-  the analysis fallback was used.
+   We report bucket counts, total points, and points per sample.
 
-Generation & model notes:
-- HF `pipeline("text-generation")` is used with left padding on decoder-only models
-  to avoid right-padding warnings. pad_token is set to eos if missing.
-- Multi-GPU: you may set `--device-map auto` (default) and optionally `--reserve-gib`
-  to leave headroom; the script computes a `max_memory` map when possible.
-- Decoding: `--decoding deterministic` (greedy) or `--decoding sampling` with
-  `--temperature`, `--top-k`, `--top-p`. When deterministic, sampling params are
-  NOT passed to Transformers (prevents “ignored flag” warnings).
+Generation & model notes
+------------------------
+- We render prompts with the model’s **chat template** via
+  `tokenizer.apply_chat_template(..., add_generation_prompt=True)` and feed
+  the resulting strings to the text-generation pipeline. This is the recommended
+  way to run GPT‑OSS with Transformers; it ensures proper Harmony markers are used.  # noqa
+  (See OpenAI Cookbook + HF chat templating docs + GPT‑OSS model card)
+- Decoder-only left padding is enabled; `pad_token_id` is set to `eos_token_id`
+  where needed to avoid warnings.
+- Reasoning effort: `--reasoning none|low|medium|high`. Higher effort yields
+  longer analysis; if `max_new_tokens` is too small, the model may never reach
+  the `final` channel. Default is `medium`.  # noqa
 
+References
+----------
+- Harmony format (OpenAI Cookbook):           https://cookbook.openai.com/articles/openai-harmony
+- Running GPT‑OSS with Transformers (Cookbook): https://cookbook.openai.com/articles/gpt-oss/run-transformers
+- GPT‑OSS 20B model card (HF):                https://huggingface.co/openai/gpt-oss-20b
+- Transformers chat templating docs (HF):     https://huggingface.co/docs/transformers/main/en/chat_templating
 """
 
 from __future__ import annotations
@@ -57,10 +65,9 @@ import os
 import re
 import sys
 import time
-import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import pyarrow as pa
@@ -94,17 +101,17 @@ class TeeLogger:
             self.file.close()
 
 # -----------------------------
-# Unit helpers
+# Units & normalization
 # -----------------------------
 UNIT_SYNONYMS = {
     "km": {
-        "km", "kms", "k", "kilometer", "kilometers", "kilometre", "kilometres",
-        "km.", "klick", "klicks", "click", "clicks"
+        "km","kms","k","kilometer","kilometers","kilometre","kilometres",
+        "km.","klick","klicks","click","clicks"
     },
-    "mi": {"mi", "mile", "miles", "statute", "statute miles", "sm"},
+    "mi": {"mi","mile","miles","statute","statute miles","sm"},
     "nmi": {
-        "nmi", "nm", "n.m.", "nautical", "nauticalmile", "nauticalmiles",
-        "sea", "sea mile", "sea miles", "seamile", "seamiles"
+        "nmi","nm","n.m.","nautical","nauticalmile","nauticalmiles",
+        "sea","sea mile","sea miles","seamile","seamiles"
     },
 }
 
@@ -115,35 +122,25 @@ def to_km(val: float, unit: str) -> float:
     return val
 
 def normalize_unit(tok: Optional[str]) -> Optional[str]:
-    if not tok:
-        return None
+    if not tok: return None
     s = tok.strip().lower()
     s_comp = re.sub(r"[\s\.\-_/]+", "", s)
-    if s in UNIT_SYNONYMS["km"] or s_comp in UNIT_SYNONYMS["km"]:
-        return "km"
-    if s in UNIT_SYNONYMS["mi"] or s_comp in UNIT_SYNONYMS["mi"] or "statute" in s:
-        return "mi"
-    if s in UNIT_SYNONYMS["nmi"] or s_comp in UNIT_SYNONYMS["nmi"] or "sea" in s:
-        return "nmi"
-    # Avoid bare 'm' ambiguity (meters vs miles) in noisy outputs.
+    if s in UNIT_SYNONYMS["km"] or s_comp in UNIT_SYNONYMS["km"]: return "km"
+    if s in UNIT_SYNONYMS["mi"] or s_comp in UNIT_SYNONYMS["mi"] or "statute" in s: return "mi"
+    if s in UNIT_SYNONYMS["nmi"] or s_comp in UNIT_SYNONYMS["nmi"] or "sea" in s: return "nmi"
     return None
 
 def unit_preference_from_user(user_text: str) -> Optional[str]:
     u = user_text.lower()
-    if any(t in u for t in ["sea mile", "sea miles", "nmi", "nm", "nautical"]):
-        return "nmi"
-    if any(t in u for t in ["klick", "klicks", "click", "clicks"]):
-        return "km"
-    if any(t in u for t in [" mile", " miles", "(mi", "statute"]):
-        return "mi"
-    if any(t in u for t in [" km", "kilometer", "kilometre"]):
-        return "km"
+    if any(t in u for t in ["sea mile","sea miles","nmi","nm","nautical"]): return "nmi"
+    if any(t in u for t in ["klick","klicks","click","clicks"]): return "km"
+    if any(t in u for t in [" mile"," miles","(mi","statute"]): return "mi"
+    if any(t in u for t in [" km","kilometer","kilometre"]): return "km"
     return None
 
 # -----------------------------
-# Fuzzy number parser
+# Numeric parsing (robust)
 # -----------------------------
-# Numerical tokens with optional unit word (localized thousands, decimals, NBSPs)
 _NUM_RE = re.compile(
     r"(?P<num>[+-]?\d[\d\s\u00A0\u202F,\.]*\d|\d(?:\.\d+)?(?:[eE][+-]?\d+)?)"
     r"(?:\s*(?P<unit>klicks?|clicks?|km(?:s)?|kilometer(?:s)?|kilometre(?:s)?|mi\.?|mile(?:s)?|statute(?:\s+miles?)?|sm|"
@@ -151,63 +148,48 @@ _NUM_RE = re.compile(
     flags=re.IGNORECASE
 )
 
-DEG_MARKERS = ["°", " deg", "deg ", "degrees", "′", "'", "″", "\"", "min", "sec"]
-RADIUS_MARKERS = ["r=6371", "r = 6371", "earth radius", "mean radius", "6371.0088", "6371 km", "r≈6371"]
-MATH_MARKERS = ["π", "pi", "rad", "radian"]
-DISTANCE_MARKERS = ["distance", "final", "answer", "result", "≈", "~", "about", "roughly",
-                    "km", "mi", "nmi", "nautical", "sea mile", "statute", "klick", "click"]
+DEG_MARKERS     = ["°"," deg","deg ","degrees","′","'","″","\"","min","sec"]
+RADIUS_MARKERS  = ["r=6371","r = 6371","earth radius","mean radius","6371.0088","6371 km","r≈6371","3437.74677"]
+MATH_MARKERS    = ["π","pi","rad","radian"]
+DISTANCE_TOKENS = ["distance","final","answer","result","≈","~","about","roughly","km","mi","nmi","nautical","sea mile","statute","klick","click"]
 
 def _parse_float_locale(num_str: str) -> Optional[float]:
-    """
-    Robustly parse floats with thousands groupings (',', '.', spaces, NBSP).
-    Heuristics:
-      - If both '.' and ',' exist: last punctuation is the decimal mark; the other is thousands.
-      - If only ',' exists: treat as thousands if pattern like 12,345 or 1,234,567; else decimal.
-      - If only '.' exists: same rule but with '.' as thousands when groups of 3.
-      - Also strip thin/regular spaces and apostrophe grouping.
-    """
+    """Parse floats with mixed thousands/decimal separators and NBSPs."""
     s = (num_str
-         .replace("\u00A0", " ")
-         .replace("\u202F", " ")
+         .replace("\u00A0"," ")
+         .replace("\u202F"," ")
          .strip())
-    # strip quotes/apostrophes also used for grouping in some locales
-    s = s.replace("’", "").replace("'", "")
+    # Some locales use apostrophes as thousands separators
+    s = s.replace("’","").replace("'","")
     has_dot = "." in s
     has_com = "," in s
 
     def only_thousands_sep(txt: str, sep: str) -> bool:
-        # e.g., 12,345 or 1,234,567 (no decimals)
         pattern = rf"^[+-]?\d{{1,3}}(?:\{sep}\d{{3}})+$"
-        return re.fullmatch(pattern, txt.replace(" ", "")) is not None
+        return re.fullmatch(pattern, txt.replace(" ","")) is not None
 
     if has_dot and has_com:
-        last_dot = s.rfind(".")
-        last_com = s.rfind(",")
+        last_dot = s.rfind("."); last_com = s.rfind(",")
         if last_dot > last_com:
-            # '.' is decimal; remove commas as thousands
-            s_clean = s.replace(",", "").replace(" ", "")
+            s_clean = s.replace(",","").replace(" ","")
         else:
-            # ',' is decimal; remove dots as thousands then replace comma with '.'
-            s_clean = s.replace(".", "").replace(" ", "")
-            s_clean = s_clean.replace(",", ".")
+            s_clean = s.replace(".","").replace(" ","")
+            s_clean = s_clean.replace(",",".")
     elif has_com and not has_dot:
-        if only_thousands_sep(s, ","):
-            s_clean = s.replace(",", "").replace(" ", "")
+        if only_thousands_sep(s,","):
+            s_clean = s.replace(",","").replace(" ","")
         else:
-            s_clean = s.replace(" ", "").replace(",", ".")
+            s_clean = s.replace(" ","").replace(",",".")
     elif has_dot and not has_com:
-        if only_thousands_sep(s, "."):
-            s_clean = s.replace(".", "").replace(" ", "")
+        if only_thousands_sep(s,"."):
+            s_clean = s.replace(".","").replace(" ","")
         else:
-            s_clean = s.replace(" ", "")
+            s_clean = s.replace(" ","")
     else:
-        # no punctuation; remove spaces
-        s_clean = s.replace(" ", "")
+        s_clean = s.replace(" ","")
 
-    # keep only valid float/exponent/sign chars
     s_clean = re.sub(r"[^0-9eE\.\+\-]", "", s_clean)
-    if not s_clean:
-        return None
+    if not s_clean: return None
     try:
         return abs(float(s_clean))
     except Exception:
@@ -222,458 +204,403 @@ class Candidate:
     end: int
     context: str
     score: int
-    score_detail: Dict[str, int]
-    km_interps: Dict[str, float]
+    score_detail: Dict[str,int]
+    km_interps: Dict[str,float]
 
 def _near_any(text: str, idx: int, window: int, needles: Sequence[str]) -> bool:
-    lo = max(0, idx - window)
-    hi = min(len(text), idx + window)
+    lo = max(0, idx - window); hi = min(len(text), idx + window)
     seg = text[lo:hi].lower()
     return any(n in seg for n in needles)
 
-def extract_candidates_with_context(text: str, tail_bias_chars: int = 1200) -> List[Candidate]:
+def extract_candidates_with_context(text: str, tail_bias_chars: int = 1200,
+                                    expected_km: Optional[float] = None,
+                                    fit_bonus: bool = True) -> List[Candidate]:
     out: List[Candidate] = []
     t = text
     for m in _NUM_RE.finditer(t):
-        num_s = m.group("num")
-        unit_s = m.group("unit")
+        num_s = m.group("num"); unit_s = m.group("unit")
         val = _parse_float_locale(num_s)
-        if val is None:
-            continue
+        if val is None: continue
         start, end = m.span()
-        lo = max(0, start - 40)
-        hi = min(len(t), end + 40)
+        lo = max(0, start-40); hi = min(len(t), end+40)
         ctx = t[lo:hi]
-
         unit_norm = normalize_unit(unit_s) if unit_s else None
 
-        # Score with breakdown
-        sd: Dict[str, int] = {}
+        sd: Dict[str,int] = {}
         score = 0
         if unit_norm:
-            sd["unit_bonus"] = 5
-            score += 5
-        if _near_any(t, start, 80, DISTANCE_MARKERS):
-            sd["near_keyword"] = sd.get("near_keyword", 0) + 3
-            score += 3
-        if _near_any(t, start, 40, ["≈", "~", "about", "roughly", "final", "answer", "result"]):
-            sd["finalish"] = sd.get("finalish", 0) + 2
-            score += 2
-        if start > len(t) - tail_bias_chars:
-            sd["tail_bias"] = 2
-            score += 2
-        if _near_any(t, start, 20, DEG_MARKERS):
-            sd["dms_penalty"] = -6
-            score -= 6
-        if _near_any(t, start, 30, MATH_MARKERS):
-            sd["math_penalty"] = -4
-            score -= 4
-        if _near_any(t, start, 40, RADIUS_MARKERS):
-            sd["radius_penalty"] = -6
-            score -= 6
+            sd["unit_bonus"]=5; score += 5
+        if _near_any(t,start,80,DISTANCE_TOKENS):
+            sd["near_keyword"]=sd.get("near_keyword",0)+3; score += 3
+        if _near_any(t,start,40,["≈","~","about","roughly","final","answer","result"]):
+            sd["finalish"]=sd.get("finalish",0)+2; score += 2
+        if start > len(t)-tail_bias_chars:
+            sd["tail_bias"]=2; score += 2
+        if _near_any(t,start,20,DEG_MARKERS):
+            sd["dms_penalty"]=-6; score -= 6
+        if _near_any(t,start,30,MATH_MARKERS):
+            sd["math_penalty"]=-4; score -= 4
+        if _near_any(t,start,40,RADIUS_MARKERS):
+            sd["radius_penalty"]=-6; score -= 6
         if val < 5.0:
-            sd["tiny_penalty"] = -1
-            score -= 1
+            sd["tiny_penalty"]=-1; score -= 1
+
+        # Plausibility gate (0..~20,500 km) → soft penalty if implausible
+        plausible = False
+        for u in ("km","mi","nmi"):
+            km_v = to_km(val,u)
+            if 0.0 <= km_v <= 20500.0:
+                plausible = True; break
+        if not plausible:
+            sd["plausibility_penalty"] = -4; score -= 4
+
+        km_interps = {"km":to_km(val,"km"), "mi":to_km(val,"mi"), "nmi":to_km(val,"nmi")}
+        # Small “fit bonus” against ground-truth to avoid picking constants
+        if fit_bonus and expected_km and expected_km > 0:
+            best_rel = min(abs(km_interps[u]-expected_km)/expected_km for u in km_interps)
+            if   best_rel < 0.01: sd["fit_bonus"]=sd.get("fit_bonus",0)+3; score += 3
+            elif best_rel < 0.05: sd["fit_bonus"]=sd.get("fit_bonus",0)+2; score += 2
+            elif best_rel < 0.10: sd["fit_bonus"]=sd.get("fit_bonus",0)+1; score += 1
 
         out.append(Candidate(
-            raw_value=val,
-            unit_raw=unit_s,
-            unit_norm=unit_norm,
-            start=start,
-            end=end,
-            context=ctx,
-            score=score,
-            score_detail=sd,
-            km_interps={
-                "km": to_km(val, "km"),
-                "mi": to_km(val, "mi"),
-                "nmi": to_km(val, "nmi"),
-            },
+            raw_value=val, unit_raw=unit_s, unit_norm=unit_norm,
+            start=start, end=end, context=ctx, score=score, score_detail=sd,
+            km_interps=km_interps
         ))
 
-    # De-duplicate by (value, unit_norm, start,end)
-    dedup: Dict[Tuple[float, Optional[str], int, int], Candidate] = {}
+    # Deduplicate exact duplicates
+    dedup: Dict[Tuple[float,Optional[str],int,int], Candidate] = {}
     for c in out:
-        key = (round(c.raw_value, 12), c.unit_norm, c.start, c.end)
-        if key not in dedup:
-            dedup[key] = c
+        key = (round(c.raw_value,12), c.unit_norm, c.start, c.end)
+        if key not in dedup: dedup[key]=c
     return list(dedup.values())
 
 # -----------------------------
-# Harmony / channel extraction
+# Harmony extraction (robust)
 # -----------------------------
-FINAL_MARK = "<|channel|>final<|message|>"
-ANALYSIS_MARK = "<|channel|>analysis<|message|>"
+# Canonical Harmony markers
+CHAN_FINAL   = "<|channel|>final<|message|>"
+CHAN_ANALYSIS= "<|channel|>analysis<|message|>"
+TAG_END      = "<|end|>"
+# Legacy-ish variants encountered in the wild
+LEGACY_ASSISTANT_FINAL    = re.compile(r"<\|start\|>\s*assistantfinal(?:<\|message\|>)?", re.IGNORECASE)
+LEGACY_ASSISTANT_ANALYSIS = re.compile(r"<\|start\|>\s*assistantanalysis(?:<\|message\|>)?", re.IGNORECASE)
 
-def _to_text_from_pipeline_obj(obj: Any) -> str:
-    """Normalize HF pipeline outputs to a printable string."""
-    if isinstance(obj, str):
-        return obj
-    # List[dict] from some chat pipelines
+def _to_text(obj: Any) -> str:
+    if isinstance(obj,str): return obj
     try:
         return json.dumps(obj, ensure_ascii=False)
     except Exception:
         return str(obj)
 
-def extract_channel_text(full: str, mark: str) -> Optional[str]:
-    if mark in full:
-        seg = full.split(mark, 1)[-1]
-        seg = re.split(r"<\|channel\|>", seg)[0]
-        return seg.strip()
-    return None
-
 def extract_final_and_analysis(full_obj: Any) -> Tuple[str, Optional[str]]:
-    full = _to_text_from_pipeline_obj(full_obj)
-    # Harmony channel markers
-    final_text = extract_channel_text(full, FINAL_MARK)
-    analysis_text = extract_channel_text(full, ANALYSIS_MARK)
-    if not final_text:
-        # Heuristic: try simple 'analysis...final...' styles seen in logs
-        #  e.g., "analysisThe user ... \nassistantfinal**Distance ...**"
-        m_final = re.search(r"(assistant)?\s*final\b[:\*]*", full, flags=re.IGNORECASE)
-        if m_final:
-            final_text = full[m_final.end():].strip()
-        else:
-            final_text = full.strip()
-    return final_text, analysis_text
+    """Return (final_text, analysis_text) from a Harmony/legacy output."""
+    full = _to_text(full_obj)
+
+    # 1) Canonical Harmony: <|channel|>final<|message|> ... <|end|>
+    if CHAN_FINAL in full:
+        fin = full.split(CHAN_FINAL,1)[1]
+        fin = fin.split("<|channel|>",1)[0]
+        fin = fin.split(TAG_END,1)[0].strip()
+        ana = None
+        if CHAN_ANALYSIS in full:
+            ana = full.split(CHAN_ANALYSIS,1)[1]
+            ana = ana.split("<|channel|>",1)[0]
+            ana = ana.split(TAG_END,1)[0].strip()
+        return fin, ana
+
+    # 2) Legacy: assistantfinal ... ; assistantanalysis ...
+    if LEGACY_ASSISTANT_FINAL.search(full):
+        start = LEGACY_ASSISTANT_FINAL.search(full).end()
+        tail  = full[start:]
+        fin = tail.split("<|start|>",1)[0]
+        fin = fin.split(TAG_END,1)[0].strip()
+        ana = None
+        m = LEGACY_ASSISTANT_ANALYSIS.search(full)
+        if m:
+            astart = m.end()
+            atail  = full[astart:]
+            ana = atail.split("<|start|>",1)[0]
+            ana = ana.split(TAG_END,1)[0].strip()
+        return fin, ana
+
+    # 3) HTML-ish tags
+    m_final = re.search(r"<final>(.*?)</final>", full, flags=re.DOTALL|re.IGNORECASE)
+    if m_final:
+        fin = m_final.group(1).strip()
+        m_ana = re.search(r"<analysis>(.*?)</analysis>", full, flags=re.DOTALL|re.IGNORECASE)
+        return fin, (m_ana.group(1).strip() if m_ana else None)
+
+    # 4) Trailing 'Final:' line as last resort
+    m = re.search(r"(Final\s*:\s*.+)$", full, flags=re.IGNORECASE|re.DOTALL)
+    if m:
+        fin = m.group(1).strip()
+        ana = full[:m.start()].strip() or None
+        return fin, ana
+
+    # 5) Fallback: whole text as final
+    return full.strip(), None
 
 # -----------------------------
-# Scoring buckets
+# Bucketing
 # -----------------------------
-def bucket_points(expected_km: float, pred_km: Optional[float]) -> Tuple[str, int, float]:
+def bucket_points(expected_km: float, pred_km: Optional[float]) -> Tuple[str,int,float]:
     if expected_km <= 0 or pred_km is None:
-        return ("wrong", 0, float("inf"))
-    rel = abs(pred_km - expected_km) / expected_km
-    if rel < 0.01: return ("perfect", 10, rel)
-    if rel < 0.05: return ("approx", 3, rel)
-    if rel < 0.10: return ("pretty_close", 1, rel)
-    return ("wrong", 0, rel)
+        return ("wrong",0,float("inf"))
+    rel = abs(pred_km-expected_km)/expected_km
+    if rel < 0.01: return ("perfect",10,rel)
+    if rel < 0.05: return ("approx",3,rel)
+    if rel < 0.10: return ("pretty_close",1,rel)
+    return ("wrong",0,rel)
 
 # -----------------------------
-# Model loader & batched inference
+# Prompt building
 # -----------------------------
-def compute_max_memory_strings(reserve_gib: Optional[float]) -> Optional[Dict[Any, str]]:
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            return None
-        n = torch.cuda.device_count()
-        if n == 0:
-            return None
-        mm = {}
-        for i in range(n):
-            props = torch.cuda.get_device_properties(i)
-            total_gib = props.total_memory / (1024**3)
-            leave = max(0.0, float(reserve_gib or 0.0))
-            alloc = max(1.0, total_gib - leave)  # leave at least 1 GiB allocable
-            mm[i] = f"{int(alloc)}GiB"
-        mm["cpu"] = f"{int(96)}GiB"  # large headroom for offload; adjust if desired
-        return mm
-    except Exception:
-        return None
+DEFAULT_DEV_SYSTEM = "you are an agent that understands GPS and can calculate distances"
 
-def load_pipeline(model_name: str,
-                  device_map: Optional[str] = "auto",
-                  reserve_gib: Optional[float] = None):
+def build_harmony_messages(system_text: str, user_text: str,
+                           reasoning: str = "medium",
+                           final_hint: bool = True) -> List[Dict[str,str]]:
     """
-    Load tokenizer/model/pipeline for gpt-oss Harmony chat.
-
-    - Left padding for decoder-only models.
-    - Pad token set to EOS if undefined.
-    - device_map and optional max_memory for multi-GPU sharding.
+    Build Harmony messages. We pass a clean 'developer' system and a user turn.
+    Optionally inject a short 'Reasoning: <level>' hint and a final-line contract.
     """
-    tok = AutoTokenizer.from_pretrained(
-        model_name,
-        padding_side="left",
-        trust_remote_code=True
-    )
-    if tok.pad_token_id is None and tok.eos_token_id is not None:
-        tok.pad_token = tok.eos_token
+    sys_lines = []
+    if reasoning.lower() in {"low","medium","high"}:
+        sys_lines.append(f"Reasoning: {reasoning.lower()}")
+    sys_lines.append("Valid channels: analysis, final.")
+    if final_hint:
+        sys_lines.append("In the final channel, finish with: Final: <number> <unit>")
 
-    model_kwargs = {
-        "trust_remote_code": True,
-        "dtype": "auto",  # new param; avoids the "torch_dtype deprecated" warning
-        "low_cpu_mem_usage": True,
-    }
-    if device_map:
-        model_kwargs["device_map"] = device_map
-    max_mem = compute_max_memory_strings(reserve_gib)
-    if max_mem:
-        model_kwargs["max_memory"] = max_mem
+    developer = (system_text or DEFAULT_DEV_SYSTEM).strip()
+    developer = developer + ("\n" + "\n".join(sys_lines) if sys_lines else "")
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        **model_kwargs
-    )
-    gen = pipeline("text-generation", model=model, tokenizer=tok)
-    return gen, tok, model_kwargs
-
-def build_messages(system_text: str, user_text: str) -> List[Dict[str, str]]:
     return [
-        {"role": "system", "content": system_text},
-        {"role": "user", "content": user_text},
+        {"role": "developer", "content": developer},
+        {"role": "user", "content": user_text.strip()},
     ]
 
-def generate_batched(
-    gen,
-    batch_messages: List[List[Dict[str, str]]],
-    decoding: str,
-    max_new_tokens: int,
-    temperature: float,
-    top_k: Optional[int],
-    top_p: Optional[float],
-) -> List[str]:
+def build_naive_prompt(system_text: str, user_text: str) -> str:
     """
-    Call the HF pipeline on a batch of Harmony messages.
-    Only pass sampling args when decoding == 'sampling' to avoid warnings.
+    Naive (pre-Harmony) render with a strong final-line contract.
     """
-    gen_kwargs = {
+    contract = (
+        "You are a careful assistant. Compute the distance between the two coordinates. "
+        "Use haversine/Vincenty as appropriate. End with a single line:\n"
+        "Final: <NUMBER> <UNIT>\n"
+    )
+    return f"[SYSTEM]\n{contract}\n{system_text.strip()}\n\n[USER]\n{user_text.strip()}\n\n[ASSISTANT]\n"
+
+# -----------------------------
+# Model / tokenizer loading
+# -----------------------------
+def load_pipeline(model_name: str,
+                  device_map: Optional[str] = "auto"):
+    tok = AutoTokenizer.from_pretrained(model_name, padding_side="left", trust_remote_code=True)
+    if tok.pad_token_id is None and tok.eos_token_id is not None:
+        tok.pad_token_id = tok.eos_token_id
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        device_map=device_map or "auto",
+        dtype="auto",
+        low_cpu_mem_usage=True,
+        trust_remote_code=True,
+    )
+    gen = pipeline("text-generation", model=model, tokenizer=tok)
+    return gen, tok
+
+def render_prompts(tok, rows: List[Tuple[str,str]], chat_format: str, reasoning: str) -> List[str]:
+    prompts = []
+    for system_text, user_text in rows:
+        if chat_format == "harmony":
+            messages = build_harmony_messages(system_text, user_text, reasoning=reasoning, final_hint=True)
+            prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            prompts.append(prompt)
+        elif chat_format == "naive":
+            prompts.append(build_naive_prompt(system_text, user_text))
+        else:
+            # default to harmony if unknown
+            messages = build_harmony_messages(system_text, user_text, reasoning=reasoning, final_hint=True)
+            prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            prompts.append(prompt)
+    return prompts
+
+# -----------------------------
+# Generation (batched)
+# -----------------------------
+def generate_batched(gen, prompts: List[str], max_new_tokens: int,
+                     decoding: str, temperature: float,
+                     top_k: Optional[int], top_p: Optional[float],
+                     hf_batch_size: int) -> Tuple[List[str], Dict]:
+    gen_kwargs: Dict[str,Any] = {
         "max_new_tokens": max_new_tokens,
+        "return_full_text": True,
+        "num_return_sequences": 1,
+        "batch_size": hf_batch_size,
+        "do_sample": decoding == "sampling",
     }
     if decoding == "sampling":
-        gen_kwargs.update({
-            "do_sample": True,
-            "temperature": float(temperature),
-        })
-        if top_k is not None:
-            gen_kwargs["top_k"] = int(top_k)
-        if top_p is not None:
-            gen_kwargs["top_p"] = float(top_p)
-    else:
-        gen_kwargs["do_sample"] = False
+        gen_kwargs["temperature"] = float(temperature)
+        if top_k is not None: gen_kwargs["top_k"] = int(top_k)
+        if top_p is not None: gen_kwargs["top_p"] = float(top_p)
 
-    out = gen(batch_messages, **gen_kwargs)
-    generated_texts: List[str] = []
-    for item in out:
+    outs = gen(prompts, **gen_kwargs)
+    texts: List[str] = []
+    for item in outs:
         if isinstance(item, dict) and "generated_text" in item:
-            generated_texts.append(item["generated_text"])
-        elif isinstance(item, list) and len(item) and isinstance(item[0], dict) and "generated_text" in item[0]:
-            generated_texts.append(item[0]["generated_text"])
+            texts.append(item["generated_text"])
         else:
-            generated_texts.append(_to_text_from_pipeline_obj(item))
-    return generated_texts, gen_kwargs
+            texts.append(_to_text(item))
+    return texts, gen_kwargs
 
 # -----------------------------
-# Candidate selection & evaluation
+# Candidate selection
 # -----------------------------
-def choose_candidate(
-    final_text: str,
-    analysis_text: Optional[str],
-    user_text: str,
-    expected_km: float,
-    logger: TeeLogger,
-    print_candidates: int = 10,
-) -> Tuple[Optional[Candidate], Optional[str], Optional[float], bool]:
-    """
-    Extract and choose a candidate from final_text; if none score > threshold,
-    try analysis_text. Returns:
-      (candidate, chosen_assumed_unit, chosen_km_value, used_analysis_fallback)
-    """
+def choose_candidate(final_text: str, analysis_text: Optional[str], user_text: str,
+                     expected_km: float, logger: TeeLogger,
+                     print_candidates: int = 12) -> Tuple[Optional[Candidate], Optional[str], Optional[float], bool]:
     unit_pref = unit_preference_from_user(user_text)
     used_analysis = False
 
-    def _rank_and_pick(text: str) -> Tuple[Optional[Candidate], Optional[str], Optional[float], List[Candidate]]:
-        cands = extract_candidates_with_context(text)
+    def _rank(text: str) -> Tuple[Optional[Candidate], Optional[str], Optional[float], List[Candidate]]:
+        cands = extract_candidates_with_context(text, expected_km=expected_km, fit_bonus=True)
         if not cands:
             return None, None, None, []
         cands_sorted = sorted(cands, key=lambda c: (c.score, c.start, c.raw_value), reverse=True)
-
-        # Pretty print top candidates (value [unit] -> km/mi/nmi)
         if print_candidates > 0:
-            logger.write(">> NUMERIC CANDIDATES (value [unit_raw] -> km/mi/nmi)\n")
+            logger.write(">> NUMERIC CANDIDATES (value [unit] → km/mi/nmi | score)\n")
             for c in cands_sorted[:print_candidates]:
-                logger.write(f"  {c.raw_value}  [{'-' if c.unit_raw is None else c.unit_raw}]  "
-                             f"->  km:{c.km_interps['km']:.6f}, mi:{c.km_interps['mi']:.6f}, nmi:{c.km_interps['nmi']:.6f}\n")
-
+                logger.write(f"  {c.raw_value}  [{'—' if c.unit_raw is None else c.unit_raw}]  "
+                             f"→ km:{c.km_interps['km']:.3f}, mi:{c.km_interps['mi']:.3f}, nmi:{c.km_interps['nmi']:.3f}  "
+                             f"| score={c.score} {c.score_detail}\n")
         top = cands_sorted[0]
         assumed = top.unit_norm
         chosen_km = None
-
-        if top.unit_norm is not None:
+        if top.unit_norm:
             chosen_km = to_km(top.raw_value, top.unit_norm)
             assumed = top.unit_norm
         else:
-            if unit_pref in ("km", "mi", "nmi"):
-                chosen_km = to_km(top.raw_value, unit_pref)
-                assumed = unit_pref
+            if unit_pref in ("km","mi","nmi"):
+                chosen_km = to_km(top.raw_value, unit_pref); assumed = unit_pref
             else:
-                # Reference magnitude = median of km-interps over up to 5 best candidates
-                pack = cands_sorted[: min(5, len(cands_sorted))]
-                ref_vals = [v for c in pack for v in (c.km_interps["km"], c.km_interps["mi"], c.km_interps["nmi"])]
-                ref_vals.sort()
-                ref = ref_vals[len(ref_vals)//2] if ref_vals else None
-                best_u, best_diff = None, float("inf")
-                for u in ("km", "mi", "nmi"):
-                    km_val = top.km_interps[u]
-                    diff = abs(km_val - (ref if ref is not None else km_val))
-                    if diff < best_diff:
-                        best_diff = diff
-                        best_u = u
-                        chosen_km = km_val
+                # pick interpretation whose km is closest to the median of nearby candidates
+                pack = cands_sorted[:min(5,len(cands_sorted))]
+                pool = [v for c in pack for v in c.km_interps.values()]
+                ref = sorted(pool)[len(pool)//2] if pool else None
+                best_u, best_d = None, float("inf")
+                for u in ("km","mi","nmi"):
+                    d = abs(top.km_interps[u] - (ref if ref is not None else top.km_interps[u]))
+                    if d < best_d:
+                        best_d, best_u = d, u
+                        chosen_km = top.km_interps[u]
                 assumed = best_u
         return top, assumed, chosen_km, cands_sorted
 
-    cand, assumed_unit, chosen_km, sorted_list = _rank_and_pick(final_text)
+    cand, assumed_unit, chosen_km, _ = _rank(final_text)
 
-    # If none or very weak, try analysis as a fallback
     if cand is None or cand.score <= 0:
         if analysis_text:
-            cand2, assumed2, km2, sorted_list2 = _rank_and_pick(analysis_text)
+            cand2, assumed2, km2, _ = _rank(analysis_text)
             if cand2 is not None and (cand is None or cand2.score > cand.score):
                 cand, assumed_unit, chosen_km = cand2, assumed2, km2
-                sorted_list = sorted_list2
                 used_analysis = True
 
-    # Last-resort tail of final_text
-    if cand is None:
-        tail = final_text[-400:]
-        cand3, assumed3, km3, _ = _rank_and_pick(tail)
-        if cand3 is not None:
-            cand, assumed_unit, chosen_km = cand3, assumed3, km3
-
-    # Decision trace for the winner
+    # Decision trace
     if cand is not None:
-        logger.write(">> DECISION TRACE (winning candidate)\n")
+        logger.write(">> DECISION TRACE (winner)\n")
         logger.write(f"  value={cand.raw_value}  unit_raw={cand.unit_raw!r}  unit_norm={cand.unit_norm!r}\n")
         logger.write(f"  assumed_unit={assumed_unit}  parsed_km={chosen_km}\n")
         logger.write(f"  score={cand.score}  breakdown={cand.score_detail}  span=[{cand.start},{cand.end}]\n")
         logger.write(f"  context=...{cand.context}...\n")
     else:
-        logger.write(">> DECISION TRACE: no numeric candidates found\n")
+        logger.write(">> DECISION TRACE: no numeric candidates\n")
 
     return cand, assumed_unit, chosen_km, used_analysis
 
 # -----------------------------
 # Eval loop
 # -----------------------------
-def run_eval(
-    eval_file: Path,
-    model_name: str,
-    out_parquet: Path,
-    out_summary: Path,
-    batch_size: int = 8,
-    max_new_tokens: int = 512,
-    decoding: str = "deterministic",   # 'deterministic' or 'sampling'
-    temperature: float = 0.0,
-    top_k: Optional[int] = None,
-    top_p: Optional[float] = None,
-    limit: Optional[int] = None,
-    verbose: bool = False,
-    log_path: Optional[Path] = None,
-    device_map: Optional[str] = "auto",
-    reserve_gib: Optional[float] = None,
-    print_limit: int = 1200,
-    channel_limit: int = -1,
-    print_candidates: int = 10,
-) -> Dict:
+def run_eval(eval_file: Path, model_name: str, out_parquet: Path, out_summary: Path,
+             chat_format: str = "harmony",
+             reasoning: str = "medium",
+             batch_size: int = 8,
+             hf_batch_size: int = 8,
+             max_new_tokens: int = 600,
+             decoding: str = "deterministic",
+             temperature: float = 0.0,
+             top_k: Optional[int] = None,
+             top_p: Optional[float] = None,
+             limit: Optional[int] = None,
+             verbose: bool = False,
+             log_path: Optional[Path] = None,
+             device_map: Optional[str] = "auto",
+             print_limit: int = 1200,
+             channel_limit: int = -1,
+             print_candidates: int = 12) -> Dict:
     logger = TeeLogger(log_path)
 
-    # One-time algorithm summary
-    if verbose:
-        logger.write("SCORING & SELECTION ALGORITHM\n")
-        logger.write("  +5 unit, +3 near distance keywords, +2 final-ish cues, +2 tail bias\n")
-        logger.write("  −6 DMS, −6 Earth radius, −4 math-only, −1 tiny magnitude (<5)\n")
-        logger.write("  Rank by (score desc, pos desc, magnitude desc); infer unit if missing.\n")
-        logger.write("  Buckets: <1% 10pts | <5% 3pts | <10% 1pt | else 0pt\n")
-        logger.write("  Fallbacks: analysis channel, then final tail.\n")
-        logger.write("─" * 80 + "\n")
-
     df = pq.read_table(eval_file).to_pandas()
-    if limit is not None:
-        df = df.head(limit).copy()
+    if limit is not None: df = df.head(limit).copy()
 
-    gen, tok, model_kwargs = load_pipeline(model_name, device_map=device_map, reserve_gib=reserve_gib)
+    gen, tok = load_pipeline(model_name, device_map=device_map)
 
-    # summarize run config
     if verbose:
-        logger.write(f"Loaded {len(df)} eval rows from {eval_file.name}\n")
+        logger.write(f"Loaded {len(df)} rows from {eval_file}\n")
         logger.write(f"Model: {model_name}\n")
-        logger.write(f"Decoding: {decoding} (kwargs will reflect sampling only if sampling)\n")
-        if model_kwargs:
-            logger.write(f"Multi-GPU: {'auto-shard' if model_kwargs.get('device_map')=='auto' else model_kwargs.get('device_map')} "
-                         f"(model_kwargs: {json.dumps(model_kwargs, indent=2)})\n")
+        logger.write(f"Chat format: {chat_format}  |  Reasoning: {reasoning}\n")
+        logger.write(f"Decoding: {decoding}  temp={temperature}  top_k={top_k} top_p={top_p}\n")
         logger.write(f"Tokenizer padding_side={tok.padding_side} pad_token_id={tok.pad_token_id}\n")
-        logger.write("─" * 80 + "\n")
+        logger.write("─"*80 + "\n")
 
     results = []
-    buckets = {"perfect": 0, "approx": 0, "pretty_close": 0, "wrong": 0}
+    buckets = {"perfect":0, "approx":0, "pretty_close":0, "wrong":0}
     total_points = 0
 
-    n = len(df)
-    batches = math.ceil(n / batch_size)
-
+    n = len(df); batches = math.ceil(n/batch_size)
     for b in range(batches):
-        lo = b * batch_size
-        hi = min(n, (b + 1) * batch_size)
+        lo = b*batch_size; hi = min(n, (b+1)*batch_size)
         batch = df.iloc[lo:hi]
 
-        # Build batch of Harmony messages
-        batch_messages = [build_messages(row["developer"], row["user"]) for _, row in batch.iterrows()]
+        pairs = [(row["developer"], row["user"]) for _,row in batch.iterrows()]
+        prompts = render_prompts(tok, pairs, chat_format=chat_format, reasoning=reasoning)
 
         t0 = time.time()
-        gen_texts, used_gen_kwargs = generate_batched(
-            gen,
-            batch_messages,
-            decoding=decoding,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
+        gen_texts, used_kwargs = generate_batched(
+            gen, prompts, max_new_tokens=max_new_tokens,
+            decoding=decoding, temperature=temperature, top_k=top_k, top_p=top_p,
+            hf_batch_size=hf_batch_size
         )
-        dt = time.time() - t0
+        dt = time.time()-t0
 
         if verbose:
-            logger.write(f"\nBATCH {b+1}/{batches}  rows {lo}..{hi-1}\n")
-            logger.write(f"Generation kwargs: {json.dumps(used_gen_kwargs)}\n")
+            logger.write(f"\nBATCH {b+1}/{batches} rows {lo}..{hi-1}\n")
+            logger.write(f"Generation kwargs: {json.dumps(used_kwargs)}\n")
 
-        for (i, row), full_text in zip(batch.iterrows(), gen_texts):
-            system_text = row["developer"]
-            user_text = row["user"]
-            expected_km = float(row["expected_km"])
-
-            # Extract Harmony channels
+        for (i,row), full_text in zip(batch.iterrows(), gen_texts):
+            system_text = row["developer"]; user_text = row["user"]; expected_km = float(row["expected_km"])
             final_text, analysis_text = extract_final_and_analysis(full_text)
 
             if verbose:
-                logger.write("\n" + "═" * 80 + "\n")
+                logger.write("\n" + "═"*80 + "\n")
                 logger.write(f"SAMPLE {i+1}/{n}  (batch {lo}-{hi-1})\n")
-                logger.write("─" * 80 + "\n")
                 logger.write(">> MESSAGES SENT\n")
                 logger.write(f"[DEVELOPER] {system_text}\n")
                 logger.write(f"[USER] {user_text}\n")
-                logger.write("─" * 80 + "\n")
-                # Raw output (possibly huge)
-                raw = _to_text_from_pipeline_obj(full_text)
-                if print_limit is not None and print_limit >= 0:
-                    logger.write(">> RAW PIPELINE OUTPUT\n")
-                    snippet = raw if print_limit == -1 else (raw[:print_limit] + ("…" if len(raw) > print_limit else ""))
-                    logger.write(snippet + ("\n" if not snippet.endswith("\n") else ""))
-                # Channels (full by default as requested)
                 logger.write(">> EXTRACTED ANALYSIS TEXT\n")
                 if analysis_text:
-                    if channel_limit is None or channel_limit < 0:
-                        logger.write(analysis_text + ("\n" if not analysis_text.endswith("\n") else ""))
-                    else:
-                        at = analysis_text[:channel_limit] + ("…" if len(analysis_text) > channel_limit else "")
-                        logger.write(at + ("\n" if not at.endswith("\n") else ""))
+                    at = analysis_text if channel_limit < 0 else (analysis_text[:channel_limit] + ("…" if len(analysis_text)>channel_limit else ""))
+                    logger.write(at + ("\n" if not at.endswith("\n") else ""))
                 else:
                     logger.write("(none)\n")
                 logger.write(">> EXTRACTED FINAL TEXT\n")
-                if channel_limit is None or channel_limit < 0:
-                    logger.write(final_text + ("\n" if not final_text.endswith("\n") else ""))
-                else:
-                    ft = final_text[:channel_limit] + ("…" if len(final_text) > channel_limit else "")
-                    logger.write(ft + ("\n" if not ft.endswith("\n") else ""))
+                ft = final_text if channel_limit < 0 else (final_text[:channel_limit] + ("…" if len(final_text)>channel_limit else ""))
+                logger.write(ft + ("\n" if not ft.endswith("\n") else ""))
 
             cand, assumed, pred_km, used_analysis = choose_candidate(
-                final_text=final_text,
-                analysis_text=analysis_text,
-                user_text=user_text,
-                expected_km=expected_km,
-                logger=logger if verbose else TeeLogger(None),
+                final_text=final_text, analysis_text=analysis_text, user_text=user_text,
+                expected_km=expected_km, logger=logger if verbose else TeeLogger(None),
                 print_candidates=print_candidates
             )
-
             bucket, pts, rel = bucket_points(expected_km, pred_km)
 
             if verbose:
@@ -682,22 +609,16 @@ def run_eval(
                 if cand is None:
                     logger.write("parsed: NONE\n")
                 else:
-                    logger.write(f"parsed_raw: {cand.raw_value} [{cand.unit_raw if cand.unit_raw else '—'}]  "
+                    logger.write(f"parsed_raw: {cand.raw_value} [{'—' if cand.unit_raw is None else cand.unit_raw}]  "
                                  f"explicit_norm={cand.unit_norm if cand.unit_norm else '—'}\n")
                     logger.write(f"assumed_unit={assumed}  parsed_km={pred_km}  rel_error={rel:.2%}\n")
-                    flags = {
-                        "near_keyword": "near_keyword" in (cand.score_detail or {}),
-                        "radius_context": "radius_penalty" in (cand.score_detail or {})
-                    }
-                    logger.write(f"flags={flags}  analysis_fallback_used={used_analysis}\n")
-                    logger.write(f"context: ...{cand.context}...\n")
                 logger.write(f"bucket={bucket}  points={pts}\n")
 
             results.append({
                 "idx": int(i),
                 "developer": system_text,
                 "user": user_text,
-                "model_output_raw": _to_text_from_pipeline_obj(full_text),
+                "model_output_raw": full_text,
                 "model_output_final": final_text,
                 "model_output_analysis": analysis_text,
                 "expected_km": expected_km,
@@ -714,14 +635,12 @@ def run_eval(
                 "span_start": None if cand is None else cand.start,
                 "span_end": None if cand is None else cand.end,
             })
-            if bucket in buckets:
-                buckets[bucket] += 1
+            if bucket in buckets: buckets[bucket]+=1
             total_points += pts
 
         if verbose:
             logger.write(f"-- batch generation time: {dt:.2f}s\n")
 
-    # write outputs
     out_parquet.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pandas(pd.DataFrame(results)), out_parquet, compression="zstd")
     summary = {
@@ -731,15 +650,12 @@ def run_eval(
         "n": len(results),
         "bucket_counts": buckets,
         "total_points": total_points,
-        "points_per_sample": (total_points / len(results)) if results else 0.0
+        "points_per_sample": (total_points/len(results)) if results else 0.0
     }
     out_summary.parent.mkdir(parents=True, exist_ok=True)
     out_summary.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-
-    if verbose:
-        logger.write("\n" + "=" * 80 + "\n")
-        logger.write(json.dumps(summary, indent=2) + "\n")
-
+    logger.write("\n" + "="*80 + "\n")
+    logger.write(json.dumps(summary, indent=2) + "\n")
     logger.close()
     return summary
 
@@ -748,63 +664,43 @@ def run_eval(
 # -----------------------------
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Run evaluation against gpt-oss (Transformers pipeline, Harmony).")
-    parser.add_argument("--eval-file", type=str, required=True, help="Path to eval_set.parquet")
-    parser.add_argument("--model", type=str, default="openai/gpt-oss-20b", help="HF model id")
-    parser.add_argument("--out", type=str, default="eval_results.parquet", help="Output Parquet file")
-    parser.add_argument("--summary", type=str, default="eval_summary.json", help="Summary JSON")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for pipeline generation")
-    parser.add_argument("--max-new-tokens", type=int, default=600)
-
-    # Decoding controls
-    parser.add_argument("--decoding", type=str, choices=["deterministic", "sampling"], default="deterministic",
-                        help="Greedy vs sampling")
-    parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (sampling only)")
-    parser.add_argument("--top-k", type=int, default=None, help="Top-k sampling (sampling only)")
-    parser.add_argument("--top-p", type=float, default=None, help="Top-p sampling (sampling only)")
-
-    parser.add_argument("--limit", type=int, default=None, help="Evaluate first N rows only")
-
-    # Logging & verbosity
-    parser.add_argument("--verbose", action="store_true", help="Print detailed per-sample logs")
-    parser.add_argument("--log", type=str, default=None, help="Path to logfile; if set, tee console output here")
-    parser.add_argument("--print-limit", type=int, default=1200,
-                        help="Max chars of RAW pipeline output to print; -1=full")
-    parser.add_argument("--channel-limit", type=int, default=-1,
-                        help="Max chars of ANALYSIS/FINAL text to print; -1=full")
-    parser.add_argument("--print-candidates", type=int, default=10,
-                        help="Print top-K numeric candidates per sample (0 to disable)")
-
-    # Device / memory options (compatibility with your previous flags)
-    parser.add_argument("--device-map", type=str, default="auto",
-                        help="Transformers device_map (e.g., auto, cuda:0).")
-    parser.add_argument("--reserve-gib", type=float, default=None,
-                        help="Leave this many GiB free per GPU (approx).")
-    parser.add_argument("--hf-batch-size", type=int, default=None,
-                        help="Alias for --batch-size (if set, overrides).")
-    parser.add_argument("--multi-gpu", type=str, default=None,
-                        help="Compatibility shim; if 'auto-shard', device_map=auto.")
-    # Back-compat no-ops (accepted to avoid argparse errors)
-    parser.add_argument("--print-limit-legacy", type=int, default=None, help=argparse.SUPPRESS)
-
-    args = parser.parse_args()
-
-    # legacy flag wiring
-    if args.multi_gpu == "auto-shard" and args.device_map != "auto":
-        args.device_map = "auto"
-    if args.hf_batch_size is not None:
-        args.batch_size = args.hf_batch_size
-    if args.print_limit_legacy is not None:
-        args.print_limit = args.print_limit_legacy
+    p = argparse.ArgumentParser(description="Run evaluation against GPT‑OSS (Transformers + Harmony).")
+    p.add_argument("--eval-file", type=str, required=True)
+    p.add_argument("--model", type=str, default="openai/gpt-oss-20b")
+    p.add_argument("--out", type=str, default="eval_results.parquet")
+    p.add_argument("--summary", type=str, default="eval_summary.json")
+    p.add_argument("--chat-format", type=str, choices=["harmony","naive"], default="harmony",
+                   help="Harmony chat template (recommended) or naive single-turn prompt")
+    p.add_argument("--reasoning", type=str, choices=["none","low","medium","high"], default="medium",
+                   help="Injected reasoning hint for Harmony; default 'medium'")
+    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--hf-batch-size", type=int, default=8)
+    p.add_argument("--max-new-tokens", type=int, default=600)
+    p.add_argument("--decoding", type=str, choices=["deterministic","sampling"], default="deterministic")
+    p.add_argument("--temperature", type=float, default=0.0)
+    p.add_argument("--top-k", type=int, default=None)
+    p.add_argument("--top-p", type=float, default=None)
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--verbose", action="store_true")
+    p.add_argument("--log", type=str, default=None)
+    p.add_argument("--device-map", type=str, default="auto")
+    p.add_argument("--print-limit", type=int, default=1200)
+    p.add_argument("--channel-limit", type=int, default=-1)
+    p.add_argument("--print-candidates", type=int, default=12)
+    args = p.parse_args()
 
     log_path = Path(args.log) if args.log else None
+    reasoning = ("none" if args.reasoning=="none" else args.reasoning)
 
     summary = run_eval(
         eval_file=Path(args.eval_file),
         model_name=args.model,
         out_parquet=Path(args.out),
         out_summary=Path(args.summary),
+        chat_format=args.chat_format,
+        reasoning=reasoning,
         batch_size=args.batch_size,
+        hf_batch_size=args.hf_batch_size,
         max_new_tokens=args.max_new_tokens,
         decoding=args.decoding,
         temperature=args.temperature,
@@ -814,7 +710,6 @@ def main():
         verbose=args.verbose,
         log_path=log_path,
         device_map=args.device_map,
-        reserve_gib=args.reserve_gib,
         print_limit=args.print_limit,
         channel_limit=args.channel_limit,
         print_candidates=args.print_candidates,
