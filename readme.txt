@@ -1,6 +1,15 @@
+EVAL
+First step: generate a table of evaluation data:
+python3 build_eval_set.py --n 1000
 
+Then run the eval with the settings you want:
+python3 run_eval_gpt_oss.py   --eval-file eval_set.parquet   --model openai/gpt-oss-20b   --out eval_results.parquet   --summary eval_summary.json   --reasoning high --max-new-tokens 2000 --decoding deterministic --verbose --log eval_run_high.txt --batch-size 8 --chat-format harmony
 
+--> In my experience for now Harmony format really does make things a lot better for this model, as does "high" reasoning. Set the batch size to whatever works on your GPU(s). Max new tokens 2000 is plenty for "high" reasoning to work it's magic, if you reduce to "medium" you can drop to 1000 or less.
 
+TRAINING
+
+(coming soon)
 
 
 list of open points
