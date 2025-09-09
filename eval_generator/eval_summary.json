@@ -1,0 +1,14 @@
+{
+  "model": "openai/gpt-oss-20b",
+  "eval_file": "eval_set.parquet",
+  "results_file": "eval_results.parquet",
+  "n": 20,
+  "bucket_counts": {
+    "perfect": 7,
+    "approx": 1,
+    "pretty_close": 2,
+    "wrong": 10
+  },
+  "total_points": 75,
+  "points_per_sample": 3.75
+}

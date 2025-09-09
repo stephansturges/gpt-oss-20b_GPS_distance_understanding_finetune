@@ -1,0 +1,33 @@
+# ------------------------------------------------------------
+# Core inference stack (Harmony chat template via Transformers)
+# ------------------------------------------------------------
+transformers>=4.56.1         # pipeline supports 'dtype' and Harmony chat template for gpt-oss
+accelerate>=0.34.2           # device placement / multi-GPU orchestration
+huggingface_hub>=0.25.2      # model downloads, auth, caching
+safetensors>=0.4.5           # fast & safe weight format
+tokenizers>=0.20.0           # fast tokenization backend
+
+# ---------------------------------
+# PyTorch (install wheel matching your CUDA)
+# ---------------------------------
+# NOTE: Do NOT hard-pin CUDA here; install the right wheel after venv creation.
+# See instructions below.
+torch>=2.5.0                 # kernels requires torch>=2.5 on CUDA (see note)
+
+# ------------------------------------------------------------
+# MXFP4 support (optional but recommended on modern NVIDIA GPUs)
+# Installs only on Linux; skip on macOS/Windows where Triton wheels may be absent.
+# ------------------------------------------------------------
+triton>=3.4.0 ; sys_platform == "linux"         # required for MXFP4 quantization kernels
+kernels>=0.1.0 ; sys_platform == "linux"        # Hugging Face Kernel Hub loader (pulls triton_kernels from HF Hub)
+
+# ---------------------------
+# Data / evaluation utilities
+# ---------------------------
+pyarrow>=16.0.0              # Parquet I/O for eval/train sets (compatible with Py3.9–3.13) 
+pandas>=2.2.2
+numpy>=1.26.4
+tqdm>=4.66.4
+packaging>=24.0
+regex>=2024.5.15
+
