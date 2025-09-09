@@ -1,0 +1,6 @@
+{
+  "km": ["km", "kilometers", "kilometres", "km.", "kilometer(s)", "kilometre(s)"],
+  "miles": ["miles", "mi", "statute miles", "statute"],
+  "nautical miles": ["nautical miles", "nmi", "nm", "sea miles"]
+}
+

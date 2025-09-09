@@ -1,0 +1,23 @@
+{
+  "analysis": {
+    "p_collapse_all": 0.06,
+    "p_collapse_some": 0.18,
+    "collapse_some_fraction_range": [0.20, 0.50],
+    "p_compact_bullets": 0.20,
+    "p_insert_blanklines": 0.12,
+    "bullet_variants": ["- ", "• ", "— "],
+    "bullet_joiners": [" • ", " | "],
+    "step_prefix_variants": ["", "", ""]
+  },
+  "final": {
+    "p_collapse_all": 0.10,
+    "p_collapse_some": 0.30,
+    "collapse_some_fraction_range": [0.15, 0.50],
+    "p_compact_bullets": 0.00,
+    "p_insert_blanklines": 0.15,
+    "bullet_variants": ["- ", "* ", "• ", "— "],
+    "bullet_joiners": [" • ", " | ", "; "],
+    "step_prefix_variants": ["Step {n} — ", "Step {n}: ", "{n}) ", "{n}. ", ""]
+  }
+}
+

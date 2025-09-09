@@ -1,0 +1,7 @@
+{
+  "km": ["km","Km","KM","kms","Kms","k","K","km.","klick","klicks","click","clicks",
+         "kilometer","kilometre","kilometers","kilometres","meters","metres","meter","metre","mtrs","mtr"],
+  "mi": ["mi","Mi","MI","mile","miles","sm","mi.","m","M","m.","give it to me in m","statute","statute miles"],
+  "nmi": ["nmi","nm","NM","nautical mile","nautical miles","sea mile","sea miles","n.m.","n mi"]
+}
+

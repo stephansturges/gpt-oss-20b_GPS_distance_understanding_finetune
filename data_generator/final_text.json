@@ -1,0 +1,21 @@
+{
+  "intro_lines": [
+    "Goal: compute the geodesic using the selected method, with a clear numeric trail.",
+    "Objective: calculate the distance cleanly and transparently with the chosen algorithm."
+  ],
+  "step1_headings": ["Step 1 — Parse the coordinates", "Parse the coordinates"],
+  "convert_headings": ["Step 2 — Convert to decimal degrees", "Convert to decimal degrees"],
+  "unit_heading": ["Step 5 — Convert to the requested unit", "Units and conversion"],
+  "answer_heading": ["Answer", "Final distance"],
+  "method_used_lines": [
+    "Method used: {method_label}.",
+    "Algorithm: {method_label}.",
+    "We computed this with {method_label}."
+  ],
+  "intuition_compare_lines": [
+    "Gut-check was ~{approx_km:.0f} km; exact is {exact_km:.1f} km (Δ≈{diff_km:.0f} km, ~{diff_pct:.1f}%).",
+    "Mental estimate ≈ {approx_km:.0f} km vs. exact {exact_km:.1f} km (off by ~{diff_pct:.1f}%).",
+    "Heuristic guess {approx_km:.0f} km; precise value {exact_km:.1f} km (gap ~{diff_km:.0f} km)."
+  ]
+}
+

@@ -1,0 +1,20 @@
+{
+  "unit_explainers": {
+    "km": {
+      "minimal": ["Units: already in kilometers."],
+      "standard": ["No conversion: result is in km."],
+      "verbose": ["Units: distance computed in kilometers; no change needed."]
+    },
+    "mi": {
+      "minimal": ["Convert km → mi by dividing by 1.609344 (exact)."],
+      "standard": ["Miles = kilometers ÷ 1.609344 (exact)."],
+      "verbose": ["1 mile = 1.609344 km (exact); convert at the end."]
+    },
+    "nmi": {
+      "minimal": ["Convert km → nmi by dividing by 1.852 (exact)."],
+      "standard": ["Nautical miles = kilometers ÷ 1.852 (exact)."],
+      "verbose": ["1 nautical mile = 1.852 km (exact); convert at the end."]
+    }
+  }
+}
+

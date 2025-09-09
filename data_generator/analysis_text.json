@@ -1,0 +1,65 @@
+{
+  "openers_with_ballpark": [
+    "Plan: quick ballpark → exact method → unit conversion.",
+    "Plan: sanity check first, then exact math, then units.",
+    "Plan: intuition, then precision, then convert.",
+    "Plan: rough distance first, then the chosen algorithm, then units.",
+    "Plan: estimate → compute → convert."
+  ],
+  "openers_no_ballpark": [
+    "Plan: exact method → unit conversion.",
+    "Plan: jump straight to the exact model, then convert."
+  ],
+  "intuitive_openers": [
+    "Let’s start with an intuition check.",
+    "First, I’ll eyeball it.",
+    "Before the exact math, a rough pass.",
+    "I’ll do a quick mental estimate first.",
+    "Quick gut‑feel first, then the real computation.",
+    "Start with a quick-and-dirty baseline.",
+    "Sanity-check the scale before we compute.",
+    "A fast back‑of‑the‑envelope first."
+  ],
+  "method_choice_transitions": [
+    "Now for the exact method:",
+    "Choosing the engine for the final number:",
+    "Time to switch to the precise model:",
+    "For the actual calculation I’ll use:",
+    "Proceeding with the exact algorithm:"
+  ],
+  "method_names": {
+    "haversine": [
+      "Haversine (spherical great‑circle)",
+      "spherical great‑circle (Haversine)",
+      "Haversine distance",
+      "Haversine on a mean-radius sphere"
+    ],
+    "vincenty": [
+      "Vincenty inverse (WGS‑84)",
+      "ellipsoidal geodesic (Vincenty, WGS‑84)",
+      "Vincenty on WGS‑84",
+      "Vincenty inverse solution"
+    ]
+  },
+  "haversine_overview": [
+    "Treat Earth as a sphere with mean radius ≈ 6371.0088 km; convert to radians, combine the latitude/longitude differences in the standard helper term, recover the central angle, then scale by the radius to get kilometers.",
+    "Spherical model: use R≈6371 km. Convert angles to radians, form the helper term from the deltas, get the central angle, then distance = R × angle.",
+    "Assume a sphere: convert to radians, use the classic helper to obtain the central angle, multiply by R≈6371.0088 km to obtain kilometers."
+  ],
+  "vincenty_overview": [
+    "Use the WGS‑84 ellipsoid (a=6 378 137 m, f=1/298.257223563). Convert to reduced latitudes (accounts for flattening), refine the longitude iteratively until it settles, compute the central angle, apply the flattening correction series, and scale to meters/kilometers.",
+    "Ellipsoidal model: reduced latitudes for flattening, iterate the longitude difference, compute the angle, add the small correction, multiply by the semi‑minor axis to get the geodesic length."
+  ],
+  "calc_intro_variants": [
+    "Now I’ll run the numbers with {method_label}.",
+    "Let’s compute it using {method_label}.",
+    "Proceeding with {method_label}.",
+    "Crunching the exact value via {method_label}.",
+    "Carrying out {method_label} step by step."
+  ],
+  "fallback_lines": [
+    "Vincenty can struggle near antipodes; if it stalls, fall back to a spherical great‑circle for a stable number.",
+    "If the ellipsoidal iteration fails to converge (rare), switch to a Haversine great‑circle as a safe fallback."
+  ]
+}
+

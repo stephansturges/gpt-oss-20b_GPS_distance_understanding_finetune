@@ -1,0 +1,8 @@
+{
+  "openers": ["Interpretation:", "Clean restatement:", "Intent recap:"],
+  "explicit_templates": ["{op} compute distance from A to B in {unit_long}."],
+  "ambiguous_templates": ["{op} compute distance from A to B; user wrote “{raw_unit}” → interpret as {unit_long}."],
+  "default_templates": ["{op} compute distance from A to B; unit not given → choose {unit_long} by default."],
+  "coord_line_templates": ["A (decimal°): {alat:.6f}°, {alon:.6f}°; B: {blat:.6f}°, {blon:.6f}°."]
+}
+

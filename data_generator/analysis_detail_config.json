@@ -1,0 +1,13 @@
+{
+  "detail_level_weights": { "minimal": 0.50, "standard": 0.40, "verbose": 0.10 },
+  "p_include_unit_explainer_when_needed": 0.65,
+  "p_include_unit_explainer_when_not_needed": 0.20,
+  "p_include_constants_by_level": { "minimal": 0.10, "standard": 0.20, "verbose": 0.30 },
+  "p_include_radian_block": 0.00,
+  "p_include_earth_model_note": 0.20,
+  "optional_block_order": ["unit", "earth"],
+  "strict_unit_alignment": true,
+  "constants_scope": "by_unit",
+  "p_include_approx_gutcheck": 0.80
+}
+

@@ -1,0 +1,9 @@
+{
+  "unit_default_weights": {"km": 0.60, "mi": 0.35, "nmi": 0.05},
+  "caps": {
+    "p_all_caps_system": 0.08,
+    "p_all_caps_user": 0.10,
+    "p_all_caps_mode_weights": {"full": 0.35, "partial": 0.65}
+  }
+}
+

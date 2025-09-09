@@ -1,0 +1,6 @@
+{
+  "section_headers": ["Quick gut‑check"],
+  "intros": ["Two‑line ballpark before the exact model."],
+  "closers": ["Ballpark ≈ {d_km:.0f} km (≈ {d_out:.0f} {unit})."]
+}
+

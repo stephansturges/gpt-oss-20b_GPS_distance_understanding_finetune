@@ -1,0 +1,29 @@
+{
+  "small": [
+    "This hop is short, so a flat grid is fine; the east–west leg shrinks by the cosine of the mid‑latitude (near cos({mid_lat:.0f}°)), so the diagonal barely tops the north–south piece.",
+    "At about {mid_lat:.0f}° latitude, a degree of longitude is smaller than at the equator; that keeps EW modest and the Pythagoras total near {ball_km:.0f} km.",
+    "Short spans behave almost like a plane here; once longitude is scaled by cos({mid_lat:.0f}°), the root‑sum‑squares stays close to {ball_km:.0f} km.",
+    "Because meridians converge with latitude, EW shrinks at ~cos φ; around {mid_lat:.0f}° that keeps the diagonal only slightly above the NS leg.",
+    "For a few dozen degrees or less, this grid shortcut hugs the great‑circle well—{ball_km:.0f} km feels reasonable.",
+    "Mid‑latitude scaling trims the EW distance; the diagonal is dominated by NS and ends up close to {ball_km:.0f} km.",
+    "Longitude distances fall with latitude; here that damping keeps the quick estimate near {ball_km:.0f} km.",
+    "On this scale, Earth’s curvature doesn’t bend the path much; the grid estimate lines up with a great‑circle around {ball_km:.0f} km.",
+    "The NS leg is doing most of the work; after the cos‑scaled EW piece, {ball_km:.0f} km is a sensible first guess.",
+    "At ~{mid_lat:.0f}°, one degree of lon is much less than 111 km, so the diagonal stays close to the NS span—{ball_km:.0f} km makes sense."
+  ],
+  "large": [
+    "One radian on Earth is roughly {EARTH_RADIUS_KM:.0f} km; at about {c:.2f} rad, that lands near {angle_times_R_km:.0f} km.",
+    "{angle_deg:.0f}° is about {frac_pct:.0f}% of a full circle; that share of ~{circumference_km:.0f} km puts us near {circle_fraction_km:.0f} km.",
+    "Most of the separation is north–south (Δlat ≈ {dlat_deg:.1f}°), already ~{ns_only_km:.0f} km; EW adds less at high latitude as meridians pinch together.",
+    "For long arcs, thinking in angles works: central angle × radius ≈ distance—{c:.2f} × {EARTH_RADIUS_KM:.0f} ≈ {angle_times_R_km:.0f} km feels right.",
+    "As a fraction of Earth’s circumference, {angle_deg:.0f}°/360° ≈ {frac_pct:.0f}% → about {circle_fraction_km:.0f} km, matching the ballpark.",
+    "Near the poles, longitude contributes less; with Δlat dominating, a total around {ball_km:.0f} km is expected.",
+    "For big spans, the straight‑ish grid fails, but the arc‑length idea holds; {c:.2f} rad is a large slice, so tens of thousands of km is normal.",
+    "Earth’s ~{circumference_km:.0f} km loop means each 10° is ~{per10deg_km:.0f} km; with ~{angle_deg:.0f}°, we’re in the {circle_fraction_km:.0f} km neighborhood.",
+    "Antipodal would be ~πR; we’re below that, so a bit under {half_circum_km:.0f} km feels plausible.",
+    "Even a NS‑only estimate is hefty (~{ns_only_km:.0f} km), so the full great‑circle near {ball_km:.0f} km makes sense.",
+    "The angle view also explains monotonicity: increase the central angle and distance must rise—{angle_deg:.0f}° is a sizable arc, so {ball_km:.0f} km tracks.",
+    "Thinking fractionally: {frac_pct:.0f}% of the globe’s loop is a big slice; that magnitude aligns with {ball_km:.0f} km."
+  ]
+}
+
