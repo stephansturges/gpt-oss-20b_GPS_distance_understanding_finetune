@@ -143,7 +143,7 @@ def unit_preference_from_user(user_text: str) -> Optional[str]:
 # -----------------------------
 # Match localized floats and optional nearby unit word.
 _NUM_RE = re.compile(
-    r"(?P<num>[+-]?\d[\d\s\u00A0\u202F,\.']*\d|\d(?:\.\d+)?(?:[eE][+-]?\d+)?)"
+    r"(?P<num>[+-]?\d[\d\s\u00A0\u202F,\.'\u2019]*\d|\d(?:\.\d+)?(?:[eE][+-]?\d+)?)"
     r"(?:\s*(?P<unit>klicks?|clicks?|km(?:s)?|kilometer(?:s)?|kilometre(?:s)?|mi\.?|mile(?:s)?|statute(?:\s+miles?)?|sm|"
     r"nmi|nm|n\.m\.|nautical(?:\s+miles?)?|sea(?:\s+miles?)?))?",
     flags=re.IGNORECASE
@@ -205,6 +205,76 @@ def _parse_float_locale(num_str: str) -> Optional[float]:
     except Exception:
         return None
 
+def _parse_num_candidates(num_str: str) -> List[float]:
+    """Return one or more plausible numeric interpretations for a localized string.
+
+    Handles ambiguous single-separator cases like "13,250" or "9.330" by returning
+    both decimal and thousands interpretations when appropriate. The caller will
+    score and choose among these candidates.
+    """
+    s = (num_str
+         .replace("\u00A0", " ")
+         .replace("\u202F", " ")
+         .strip())
+    # Strip grouping apostrophes
+    s = s.replace("’", "").replace("'", "")
+    has_dot = "." in s
+    has_com = "," in s
+    vals: List[float] = []
+
+    def as_float(txt: str) -> Optional[float]:
+        try:
+            return abs(float(txt))
+        except Exception:
+            return None
+
+    # Both separators present → use locale heuristic (rightmost is decimal)
+    if has_dot and has_com:
+        last_dot = s.rfind(".")
+        last_com = s.rfind(",")
+        if last_dot > last_com:
+            primary = s.replace(",", "").replace(" ", "")
+        else:
+            primary = s.replace(".", "").replace(" ", "")
+            primary = primary.replace(",", ".")
+        v = as_float(primary)
+        return [v] if v is not None else []
+
+    # Single separator cases → may be ambiguous
+    if has_com and not has_dot:
+        core = s.replace(" ", "")
+        parts = core.split(",")
+        if len(parts) == 2 and len(parts[1]) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            # Ambiguous: decimal vs thousands
+            dec = as_float(core.replace(",", "."))
+            thou = as_float(core.replace(",", ""))
+            for v in (dec, thou):
+                if v is not None and v not in vals:
+                    vals.append(v)
+            return vals
+        # Default: treat comma as decimal
+        v = as_float(core.replace(",", "."))
+        return [v] if v is not None else []
+
+    if has_dot and not has_com:
+        core = s.replace(" ", "")
+        parts = core.split(".")
+        if len(parts) == 2 and len(parts[1]) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            # Ambiguous: decimal vs thousands
+            dec = as_float(core)
+            thou = as_float(core.replace(".", ""))
+            for v in (dec, thou):
+                if v is not None and v not in vals:
+                    vals.append(v)
+            return vals
+        # Default: treat dot as decimal, but remove spaces
+        v = as_float(core)
+        return [v] if v is not None else []
+
+    # No separators: just digits (after stripping spaces/apostrophes)
+    v = as_float(s.replace(" ", ""))
+    return [v] if v is not None else []
+
 @dataclass
 class Candidate:
     raw_value: float
@@ -223,57 +293,64 @@ def _near_any(text: str, idx: int, window: int, needles: Sequence[str]) -> bool:
     seg = text[lo:hi].lower()
     return any(n in seg for n in needles)
 
-def extract_candidates_with_context(text: str, tail_bias_chars: int = 1400) -> List[Candidate]:
-    """Extract numeric candidates with local context and a heuristic score."""
+def extract_candidates_with_context(text: str, tail_bias_chars: int = 1200) -> List[Candidate]:
+    """Extract numeric candidates with local context and a heuristic score.
+
+    Ported to include multi-interpretation parsing for ambiguous separators,
+    mirroring run_eval_gpt_oss.py behavior.
+    """
     out: List[Candidate] = []
     t = text
     for m in _NUM_RE.finditer(t):
         num_s = m.group("num")
         unit_s = m.group("unit")
-        val = _parse_float_locale(num_s)
-        if val is None:
+        vals = _parse_num_candidates(num_s)
+        if not vals:
             continue
         start, end = m.span()
-        lo = max(0, start - 48)
-        hi = min(len(t), end + 48)
+        lo = max(0, start - 40)
+        hi = min(len(t), end + 40)
         ctx = t[lo:hi]
+
         unit_norm = normalize_unit(unit_s) if unit_s else None
 
-        # Score with breakdown
-        sd: Dict[str, int] = {}
-        score = 0
-        if unit_norm:
-            sd["unit_bonus"] = 5; score += 5
-        if _near_any(t, start, 96, DISTANCE_MARKERS):
-            sd["near_keyword"] = sd.get("near_keyword", 0) + 3; score += 3
-        if _near_any(t, start, 48, ["≈", "~", "about", "roughly", "final", "answer", "result"]):
-            sd["finalish"] = sd.get("finalish", 0) + 2; score += 2
-        if start > len(t) - tail_bias_chars:
-            sd["tail_bias"] = 2; score += 2
-        if _near_any(t, start, 24, DEG_MARKERS):
-            sd["dms_penalty"] = -6; score -= 6
-        if _near_any(t, start, 36, MATH_MARKERS):
-            sd["math_penalty"] = -4; score -= 4
-        if _near_any(t, start, 48, RADIUS_MARKERS):
-            sd["radius_penalty"] = -6; score -= 6
-        if val < 5.0:
-            sd["tiny_penalty"] = -1; score -= 1
+        for _idx, val in enumerate(vals):
+            sd: Dict[str, int] = {}
+            score = 0
+            if unit_norm:
+                sd["unit_bonus"] = 5; score += 5
+            if _near_any(t, start, 80, DISTANCE_MARKERS):
+                sd["near_keyword"] = sd.get("near_keyword", 0) + 3; score += 3
+            if _near_any(t, start, 40, ["≈", "~", "about", "roughly", "final", "answer", "result"]):
+                sd["finalish"] = sd.get("finalish", 0) + 2; score += 2
+            if start > len(t) - tail_bias_chars:
+                sd["tail_bias"] = 2; score += 2
+            if _near_any(t, start, 20, DEG_MARKERS):
+                sd["dms_penalty"] = -6; score -= 6
+            if _near_any(t, start, 30, MATH_MARKERS):
+                sd["math_penalty"] = -4; score -= 4
+            if _near_any(t, start, 40, RADIUS_MARKERS):
+                sd["radius_penalty"] = -6; score -= 6
+            if val < 5.0:
+                sd["tiny_penalty"] = -1; score -= 1
+            if len(vals) > 1:
+                sd["ambig_sep"] = sd.get("ambig_sep", 0) + 0
 
-        out.append(Candidate(
-            raw_value=val,
-            unit_raw=unit_s,
-            unit_norm=unit_norm,
-            start=start,
-            end=end,
-            context=ctx,
-            score=score,
-            score_detail=sd,
-            km_interps={
-                "km": to_km(val, "km"),
-                "mi": to_km(val, "mi"),
-                "nmi": to_km(val, "nmi"),
-            },
-        ))
+            out.append(Candidate(
+                raw_value=val,
+                unit_raw=unit_s,
+                unit_norm=unit_norm,
+                start=start,
+                end=end,
+                context=ctx,
+                score=score,
+                score_detail=sd,
+                km_interps={
+                    "km": to_km(val, "km"),
+                    "mi": to_km(val, "mi"),
+                    "nmi": to_km(val, "nmi"),
+                },
+            ))
 
     # De-duplicate exact duplicates by (value, unit_norm, start,end)
     dedup: Dict[Tuple[float, Optional[str], int, int], Candidate] = {}
@@ -882,4 +959,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
